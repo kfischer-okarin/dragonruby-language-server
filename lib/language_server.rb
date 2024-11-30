@@ -24,6 +24,7 @@ class LanguageServer
 
   def initialize
     @text_document_store = nil
+    @completion_provider = UnsupportedProvider.new
   end
 
   def process_request(request)
@@ -50,6 +51,14 @@ class LanguageServer
       textDocumentSync: @text_document_store.text_document_sync_options
     }
 
+    if client_capabilities.dig('textDocument', 'completion')
+      @completion_provider = CompletionProvider.build(
+        client_capabilities['textDocument']['completion'],
+        text_document_store: @text_document_store
+      )
+      server_capabilities['completionProvider'] = @completion_provider.capabilities
+    end
+
     {
       capabilities: server_capabilities,
       serverInfo: { name: 'DragonRuby built-in Language Server', version: $gtk.version }
@@ -62,6 +71,10 @@ class LanguageServer
 
   def handle_text_document_did_change(message)
     @text_document_store.handle_text_document_did_change(message['params'])
+  end
+
+  def handle_text_document_completion(message)
+    @completion_provider.handle_text_document_completion(message['params'])
   end
 end
 
@@ -149,6 +162,79 @@ class LanguageServer
       result = string.lines
       result << '' if result.empty? # Because empty string will produce an empty array
       result
+    end
+  end
+end
+
+class LanguageServer
+  class UnsupportedProvider
+    def method_missing(*)
+      raise UnsupportedMethodError
+    end
+  end
+end
+
+class LanguageServer
+  class CompletionProvider
+    def self.build(client_capabilities, text_document_store:)
+      new(client_capabilities, text_document_store: text_document_store)
+    end
+
+    attr_reader :capabilities
+
+    def initialize(client_capabilities, text_document_store:)
+      # https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionClientCapabilities
+      @client_capabilities = client_capabilities
+      @text_document_store = text_document_store
+      # https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionOptions
+      @capabilities = {
+        triggerCharacters: ['.']
+      }
+
+      # TODO: Resolve support
+      # - Documentation
+      #   - Read from local documentation database file with short markdown docs
+      #   - Check @client_capabilities['completionItem']['resolveSupport'].include?('documentation')
+      # - Detail
+      #   - Current value of args....
+      #   - Check @client_capabilities['completionItem']['resolveSupport'].include?('detail')
+    end
+
+    def handle_text_document_completion(params)
+      uri = params['textDocument']['uri']
+      document_lines = @text_document_store.document_lines(uri)
+      current_line = document_lines[params['position']['line']]
+      character_index = params['position']['character']
+
+      identifier_start_index = character_index
+      puts "current_line: '#{current_line}'"
+      puts '              ' + ' ' * identifier_start_index + '^'
+      while identifier_start_index >= 0
+        break if current_line[identifier_start_index - 1] == ' '
+
+        identifier_start_index -= 1
+      end
+      return [] if identifier_start_index.negative?
+
+      identifier = current_line[identifier_start_index..character_index]
+      identifier = "$#{identifier}" if identifier.start_with?('args')
+      puts "identifier: '#{identifier}'"
+      if identifier.start_with?('$')
+        period_index = identifier.rindex('.')
+        object_part = identifier[0...period_index]
+        completion_prefix = identifier[period_index + 1..].strip
+        object = eval(object_part)
+        object.autocomplete_methods.select { |method|
+          method.start_with?(completion_prefix)
+        }.map { |method|
+          {
+            label: method.to_s,
+            kind: 2 # Method
+          }
+        }
+      else
+        []
+      end
     end
   end
 end
